@@ -27,6 +27,31 @@ function isSafeFilename(value: unknown): value is string {
   );
 }
 
+router.get('/footage', async (_req, res) => {
+  try {
+    await fs.mkdir(VIDEO_DIR, { recursive: true });
+
+    const files = await fs.readdir(VIDEO_DIR);
+
+    const videos = files.filter((filename) =>
+      VIDEO_EXTENSIONS.has(path.extname(filename).toLowerCase())
+    );
+
+    return res.json({
+      success: true,
+      videos,
+    });
+  } catch (error) {
+    console.error('Failed to list stock footage:', error);
+
+    return res.status(500).json({
+      success: false,
+      error: 'Could not load stock footage.',
+    });
+  }
+});
+
+
 router.post('/render', async (req, res) => {
   const { videoFilename, audioFilename } = req.body ?? {};
 
