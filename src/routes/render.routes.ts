@@ -15,6 +15,14 @@ const OUTPUT_DIR = path.join(ASSETS_DIR, 'outputs');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v']);
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a']);
+const FFMPEG_PATH = '/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg';
+const FFPROBE_PATH = '/opt/homebrew/opt/ffmpeg-full/bin/ffprobe';
+
+const TITLES = [
+  'YOUR NEXT BIG IDEA',
+  'TURN IDEAS INTO ACTION',
+  'CREATE SOMETHING AMAZING',
+];
 
 function isSafeFilename(value: unknown): value is string {
   return (
@@ -32,15 +40,13 @@ router.get('/footage', async (_req, res) => {
     await fs.mkdir(VIDEO_DIR, { recursive: true });
 
     const files = await fs.readdir(VIDEO_DIR);
+    const videos = files
+      .filter((name) =>
+        VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase())
+      )
+      .sort();
 
-    const videos = files.filter((filename) =>
-      VIDEO_EXTENSIONS.has(path.extname(filename).toLowerCase())
-    );
-
-    return res.json({
-      success: true,
-      videos,
-    });
+    return res.json({ success: true, videos });
   } catch (error) {
     console.error('Failed to list stock footage:', error);
 
@@ -50,7 +56,6 @@ router.get('/footage', async (_req, res) => {
     });
   }
 });
-
 
 router.post('/render', async (req, res) => {
   const { videoFilename, audioFilename } = req.body ?? {};
@@ -75,7 +80,6 @@ router.post('/render', async (req, res) => {
     });
   }
 
-  const videoPath = path.join(VIDEO_DIR, videoFilename);
   const audioPath = path.join(OUTPUT_DIR, audioFilename);
   const outputFilename = `${randomUUID()}.mp4`;
   const outputPath = path.join(OUTPUT_DIR, outputFilename);
@@ -84,67 +88,140 @@ router.post('/render', async (req, res) => {
     await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
     await Promise.all([
-      fs.access(videoPath),
+      fs.access(path.join(VIDEO_DIR, videoFilename)),
       fs.access(audioPath),
     ]);
 
-    // Loop the source video, crop it to vertical 9:16,
-    // and stop when the narration audio finishes.
-    await execFileAsync(
-      'ffmpeg',
+    const footageFiles = (await fs.readdir(VIDEO_DIR))
+      .filter((name) =>
+        VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase())
+      )
+      .sort();
+
+    if (!footageFiles.length) {
+      throw new Error('No stock footage found.');
+    }
+
+    const probe = await execFileAsync(FFPROBE_PATH, [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      audioPath,
+    ]);
+
+    const duration = Number.parseFloat(probe.stdout.trim());
+
+    if (!Number.isFinite(duration) || duration <= 0) {
+      throw new Error('Invalid narration duration.');
+    }
+
+    const sceneCount = 3;
+    const sceneDuration = duration / sceneCount;
+    const inputArgs: string[] = [];
+    const filters: string[] = [];
+
+    for (let i = 0; i < sceneCount; i++) {
+      const filename =
+        i === 0
+          ? videoFilename
+          : footageFiles[i % footageFiles.length];
+
+      inputArgs.push(
+        '-stream_loop', '-1',
+        '-i', path.join(VIDEO_DIR, filename)
+      );
+    }
+
+    inputArgs.push('-i', audioPath);
+
+    for (let i = 0; i < sceneCount; i++) {
+      const title = TITLES[i];
+      const safeTitle = title.replace(/[^A-Za-z0-9 ]/g, '');
+      const fadeOutStart = Math.max(0, sceneDuration - 0.35);
+
+      filters.push(
+        `[${i}:v]` +
+        `trim=duration=${sceneDuration},setpts=PTS-STARTPTS,` +
+        `scale=1080:1920:force_original_aspect_ratio=increase,` +
+        `crop=1080:1920,` +
+        `zoompan=z='min(zoom+0.0006,1.08)':` +
+        `x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':` +
+        `d=1:s=1080x1920:fps=30,` +
+        `drawtext=text='${safeTitle}':fontcolor=white:fontsize=62:` +
+        `borderw=3:bordercolor=black:x=(w-text_w)/2:y=h*0.72:` +
+        `alpha='if(lt(t,0.4),t/0.4,1)',` +
+        `fade=t=in:st=0:d=0.35,` +
+        `fade=t=out:st=${fadeOutStart}:d=0.35,` +
+        `setsar=1,format=yuv420p[v${i}]`
+      );
+    }
+
+    filters.push(
+      `${Array.from({ length: sceneCount }, (_, i) => `[v${i}]`).join('')}` +
+      `concat=n=${sceneCount}:v=1:a=0[outv]`
+    );
+
+    await execFileAsync(FFMPEG_PATH,
       [
         '-y',
-        '-stream_loop', '-1',
-        '-i', videoPath,
-        '-i', audioPath,
-        '-map', '0:v:0',
-        '-map', '1:a:0',
-        '-vf',
-        'scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,setsar=1',
+        ...inputArgs,
+        '-filter_complex', filters.join(';'),
+        '-map', '[outv]',
+        '-map', `${sceneCount}:a:0`,
+        '-t', String(duration),
         '-c:v', 'libx264',
         '-preset', 'veryfast',
         '-crf', '23',
         '-pix_fmt', 'yuv420p',
+        '-r', '30',
         '-c:a', 'aac',
         '-b:a', '192k',
         '-ar', '44100',
-        '-shortest',
         '-movflags', '+faststart',
         outputPath,
       ],
-      {
-        timeout: 600000,
-        maxBuffer: 5 * 1024 * 1024,
-      }
+      { timeout: 600000, maxBuffer: 10 * 1024 * 1024 }
     );
 
     const stats = await fs.stat(outputPath);
 
-    if (stats.size === 0) {
-      throw new Error('FFmpeg created an empty output file.');
+    if (!stats.size) {
+      throw new Error('FFmpeg generated an empty file.');
     }
 
     return res.status(201).json({
       success: true,
-      message: 'Reel rendered successfully.',
+      message: 'Animated reel rendered successfully.',
       video: {
         filename: outputFilename,
         url: `/assets/outputs/${outputFilename}`,
         format: 'mp4',
         width: 1080,
         height: 1920,
+        durationSeconds: duration,
+        scenes: sceneCount,
         sizeBytes: stats.size,
       },
     });
   } catch (error) {
     await fs.unlink(outputPath).catch(() => undefined);
+    if (error instanceof Error) {
+  console.error('Video rendering failed:', error.message);
 
-    console.error('Video rendering failed:', error);
+  const details = error as Error & {
+    stderr?: string;
+    stdout?: string;
+  };
+
+  console.error('FFmpeg stderr:', details.stderr ?? 'No stderr available');
+  console.error('FFmpeg stdout:', details.stdout ?? '');
+} else {
+  console.error('Video rendering failed:', error);
+}
 
     return res.status(500).json({
       success: false,
-      error:
-        'Video rendering failed. Check that the source files exist and FFmpeg supports H.264 encoding.',
+      error: 'Video rendering failed. Check FFmpeg, ffprobe, and input files.',
     });
   }
 });
