@@ -806,6 +806,18 @@
             }
         }
 
+        console.log("Dashboard JavaScript loaded");
+        console.log("Current URL:", window.location.href);
+
+        fetch("/api/status", {cache: "no-store"})
+            .then(async response => {
+                console.log("Status HTTP:", response.status);
+                console.log("Status response:", await response.text());
+            })
+            .catch(error => {
+                console.error("Status fetch failed:", error);
+            });
+
         loadStatus();
         setInterval(loadStatus, 5000);
     </script>
