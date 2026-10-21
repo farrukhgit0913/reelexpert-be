@@ -7,6 +7,8 @@ import path from 'node:path';
 import healthRoutes from './routes/health.routes';
 import statusRoutes from './routes/status.routes';
 import scriptsRoutes from './routes/scripts.routes';
+import ttsRoutes from './routes/tts.routes';
+import renderRoutes from './routes/render.routes';
 
 const app = express();
 
@@ -30,6 +32,9 @@ app.use(morgan('dev'));
 app.use('/api', healthRoutes);
 app.use('/api', statusRoutes);
 app.use('/api', scriptsRoutes);
+app.use('/api', ttsRoutes);
+app.use('/api', renderRoutes);
+app.use('/assets', express.static(path.resolve(process.cwd(), 'assets')));
 
 // Static assets: /assets/...
 app.use(
