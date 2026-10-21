@@ -39,6 +39,20 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan('dev'));
 
+/**
+ * Serve static assets.
+ * Makes backend/assets/icons/logo.svg available at:
+ * http://localhost:3000/assets/icons/logo.svg
+ */
+app.use(
+  '/assets',
+  express.static(path.join(ROOT, 'assets'), {
+    fallthrough: false,
+    immutable: false,
+    maxAge: 0
+  })
+);
+
 // Serve dashboard files.
 app.use(express.static(PUBLIC_DIR));
 
