@@ -6,6 +6,9 @@ dist/
 build/
 out/
 
+# Generated audio and video
+assets/outputs/*
+
 # Environment files and secrets
 .env
 .env.*

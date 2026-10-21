@@ -19,9 +19,17 @@ const ASSETS_DIR = path.join(ROOT, 'assets');
 
 // Middleware
 app.use(
+  cors({
+    origin: "*",
+  }),
+);
+
+app.use(
   helmet({
-    contentSecurityPolicy: false,
-  })
+    crossOriginResourcePolicy: {
+      policy: "cross-origin",
+    },
+  }),
 );
 
 app.use(cors());
