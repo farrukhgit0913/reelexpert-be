@@ -1,4 +1,3 @@
-
 import { Router } from 'express';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -12,9 +11,12 @@ const execFileAsync = promisify(execFile);
 const ASSETS_DIR = path.resolve(process.cwd(), 'assets');
 const VIDEO_DIR = path.join(ASSETS_DIR, 'stock-footage');
 const OUTPUT_DIR = path.join(ASSETS_DIR, 'outputs');
+const CARTOON_DIR = path.join(OUTPUT_DIR, 'cartoon-scenes');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v']);
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a']);
+const IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+
 const FFMPEG_PATH = '/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg';
 const FFPROBE_PATH = '/opt/homebrew/opt/ffmpeg-full/bin/ffprobe';
 
@@ -58,17 +60,15 @@ router.get('/footage', async (_req, res) => {
 });
 
 router.post('/render', async (req, res) => {
-  const { videoFilename, audioFilename } = req.body ?? {};
+  const {
+    videoFilename,
+    audioFilename,
+    cartoonSceneFilenames,
+  } = req.body ?? {};
 
-  if (
-    !isSafeFilename(videoFilename) ||
-    !VIDEO_EXTENSIONS.has(path.extname(videoFilename).toLowerCase())
-  ) {
-    return res.status(400).json({
-      success: false,
-      error: 'Provide a valid source video filename.',
-    });
-  }
+  const cartoonMode =
+    Array.isArray(cartoonSceneFilenames) &&
+    cartoonSceneFilenames.length > 0;
 
   if (
     !isSafeFilename(audioFilename) ||
@@ -80,6 +80,34 @@ router.post('/render', async (req, res) => {
     });
   }
 
+  if (cartoonMode) {
+    if (
+      cartoonSceneFilenames.length > 30 ||
+      !cartoonSceneFilenames.every(
+        (filename: unknown) =>
+          isSafeFilename(filename) &&
+          IMAGE_EXTENSIONS.has(
+            path.extname(filename).toLowerCase()
+          )
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'Provide 1 to 30 valid cartoon image filenames.',
+      });
+    }
+  } else {
+    if (
+      !isSafeFilename(videoFilename) ||
+      !VIDEO_EXTENSIONS.has(path.extname(videoFilename).toLowerCase())
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'Provide a valid source video filename.',
+      });
+    }
+  }
+
   const audioPath = path.join(OUTPUT_DIR, audioFilename);
   const outputFilename = `${randomUUID()}.mp4`;
   const outputPath = path.join(OUTPUT_DIR, outputFilename);
@@ -87,19 +115,30 @@ router.post('/render', async (req, res) => {
   try {
     await fs.mkdir(OUTPUT_DIR, { recursive: true });
 
-    await Promise.all([
-      fs.access(path.join(VIDEO_DIR, videoFilename)),
-      fs.access(audioPath),
-    ]);
+    await fs.access(audioPath);
 
-    const footageFiles = (await fs.readdir(VIDEO_DIR))
-      .filter((name) =>
-        VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase())
-      )
-      .sort();
+    let sourceFiles: string[] = [];
 
-    if (!footageFiles.length) {
-      throw new Error('No stock footage found.');
+    if (cartoonMode) {
+      sourceFiles = cartoonSceneFilenames as string[];
+
+      await Promise.all(
+        sourceFiles.map((filename) =>
+          fs.access(path.join(CARTOON_DIR, filename))
+        )
+      );
+    } else {
+      await fs.access(path.join(VIDEO_DIR, videoFilename));
+
+      sourceFiles = (await fs.readdir(VIDEO_DIR))
+        .filter((name) =>
+          VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase())
+        )
+        .sort();
+
+      if (!sourceFiles.length) {
+        throw new Error('No stock footage found.');
+      }
     }
 
     const probe = await execFileAsync(FFPROBE_PATH, [
@@ -115,41 +154,63 @@ router.post('/render', async (req, res) => {
       throw new Error('Invalid narration duration.');
     }
 
-    const sceneCount = 3;
+    const sceneCount = cartoonMode ? sourceFiles.length : 3;
     const sceneDuration = duration / sceneCount;
     const inputArgs: string[] = [];
     const filters: string[] = [];
 
+    // Add one input per scene.
     for (let i = 0; i < sceneCount; i++) {
-      const filename =
-        i === 0
-          ? videoFilename
-          : footageFiles[i % footageFiles.length];
+      if (cartoonMode) {
+        const imagePath = path.join(CARTOON_DIR, sourceFiles[i]);
 
-      inputArgs.push(
-        '-stream_loop', '-1',
-        '-i', path.join(VIDEO_DIR, filename)
-      );
+        // Loop the still image so FFmpeg can animate it.
+        inputArgs.push(
+          '-loop', '1',
+          '-framerate', '30',
+          '-t', String(sceneDuration),
+          '-i', imagePath
+        );
+      } else {
+        const filename =
+          i === 0
+            ? videoFilename
+            : sourceFiles[i % sourceFiles.length];
+
+        inputArgs.push(
+          '-stream_loop', '-1',
+          '-i', path.join(VIDEO_DIR, filename)
+        );
+      }
     }
 
+    // The narration is the final input.
     inputArgs.push('-i', audioPath);
 
     for (let i = 0; i < sceneCount; i++) {
-      const title = TITLES[i];
-      const safeTitle = title.replace(/[^A-Za-z0-9 ]/g, '');
       const fadeOutStart = Math.max(0, sceneDuration - 0.35);
+
+      const title = cartoonMode
+        ? ''
+        : TITLES[i % TITLES.length].replace(/[^A-Za-z0-9 ]/g, '');
+
+      const titleFilter = title
+        ? `drawtext=text='${title}':fontcolor=white:fontsize=62:` +
+          `borderw=3:bordercolor=black:x=(w-text_w)/2:y=h*0.72:` +
+          `alpha='if(lt(t,0.4),t/0.4,1)',`
+        : '';
 
       filters.push(
         `[${i}:v]` +
-        `trim=duration=${sceneDuration},setpts=PTS-STARTPTS,` +
+        `trim=duration=${sceneDuration},` +
+        `setpts=PTS-STARTPTS,` +
         `scale=1080:1920:force_original_aspect_ratio=increase,` +
         `crop=1080:1920,` +
         `zoompan=z='min(zoom+0.0006,1.08)':` +
-        `x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':` +
+        `x='iw/2-(iw/zoom/2)':` +
+        `y='ih/2-(ih/zoom/2)':` +
         `d=1:s=1080x1920:fps=30,` +
-        `drawtext=text='${safeTitle}':fontcolor=white:fontsize=62:` +
-        `borderw=3:bordercolor=black:x=(w-text_w)/2:y=h*0.72:` +
-        `alpha='if(lt(t,0.4),t/0.4,1)',` +
+        titleFilter +
         `fade=t=in:st=0:d=0.35,` +
         `fade=t=out:st=${fadeOutStart}:d=0.35,` +
         `setsar=1,format=yuv420p[v${i}]`
@@ -157,11 +218,15 @@ router.post('/render', async (req, res) => {
     }
 
     filters.push(
-      `${Array.from({ length: sceneCount }, (_, i) => `[v${i}]`).join('')}` +
+      `${Array.from(
+        { length: sceneCount },
+        (_, i) => `[v${i}]`
+      ).join('')}` +
       `concat=n=${sceneCount}:v=1:a=0[outv]`
     );
 
-    await execFileAsync(FFMPEG_PATH,
+    await execFileAsync(
+      FFMPEG_PATH,
       [
         '-y',
         ...inputArgs,
@@ -180,7 +245,10 @@ router.post('/render', async (req, res) => {
         '-movflags', '+faststart',
         outputPath,
       ],
-      { timeout: 600000, maxBuffer: 10 * 1024 * 1024 }
+      {
+        timeout: 600000,
+        maxBuffer: 10 * 1024 * 1024,
+      }
     );
 
     const stats = await fs.stat(outputPath);
@@ -191,7 +259,9 @@ router.post('/render', async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: 'Animated reel rendered successfully.',
+      message: cartoonMode
+        ? 'Cartoon reel rendered successfully.'
+        : 'Animated reel rendered successfully.',
       video: {
         filename: outputFilename,
         url: `/assets/outputs/${outputFilename}`,
@@ -200,24 +270,29 @@ router.post('/render', async (req, res) => {
         height: 1920,
         durationSeconds: duration,
         scenes: sceneCount,
+        mode: cartoonMode ? 'cartoon' : 'standard',
         sizeBytes: stats.size,
       },
     });
   } catch (error) {
     await fs.unlink(outputPath).catch(() => undefined);
+
     if (error instanceof Error) {
-  console.error('Video rendering failed:', error.message);
+      console.error('Video rendering failed:', error.message);
 
-  const details = error as Error & {
-    stderr?: string;
-    stdout?: string;
-  };
+      const details = error as Error & {
+        stderr?: string;
+        stdout?: string;
+      };
 
-  console.error('FFmpeg stderr:', details.stderr ?? 'No stderr available');
-  console.error('FFmpeg stdout:', details.stdout ?? '');
-} else {
-  console.error('Video rendering failed:', error);
-}
+      console.error(
+        'FFmpeg stderr:',
+        details.stderr ?? 'No stderr available'
+      );
+      console.error('FFmpeg stdout:', details.stdout ?? '');
+    } else {
+      console.error('Video rendering failed:', error);
+    }
 
     return res.status(500).json({
       success: false,

@@ -1,4 +1,3 @@
-
 const OLLAMA_URL = (
   process.env.OLLAMA_URL || 'http://127.0.0.1:11434'
 ).replace(/\/$/, '');
@@ -11,6 +10,15 @@ export interface GenerateReelInput {
   platform: string;
   language: string;
   duration: number;
+  style?: string;
+  mode?: 'standard' | 'cartoon';
+}
+
+export interface ReelCharacter {
+  name: string;
+  appearance: string;
+  personality: string;
+  voiceDescription: string;
 }
 
 export interface ReelScene {
@@ -19,6 +27,8 @@ export interface ReelScene {
   visual: string;
   voiceover: string;
   textOverlay: string;
+  speaker?: string;
+  dialogue?: string;
 }
 
 export interface GeneratedReel {
@@ -28,6 +38,8 @@ export interface GeneratedReel {
   hashtags: string[];
   scenes: ReelScene[];
   callToAction: string;
+  mode?: 'standard' | 'cartoon';
+  characters?: ReelCharacter[];
 }
 
 function extractJson(content: string): unknown {
@@ -51,7 +63,8 @@ function extractJson(content: string): unknown {
 
 function normalizeReel(
   value: unknown,
-  targetDuration: number
+  targetDuration: number,
+  mode: 'standard' | 'cartoon'
 ): GeneratedReel {
   if (!value || typeof value !== 'object') {
     throw new Error('Invalid reel response from Ollama.');
@@ -63,6 +76,30 @@ function normalizeReel(
     throw new Error('Ollama returned a reel without scenes.');
   }
 
+  const characters: ReelCharacter[] = Array.isArray(data.characters)
+    ? data.characters
+        .filter(
+          (item): item is Record<string, unknown> =>
+            !!item && typeof item === 'object'
+        )
+        .map((item) => ({
+          name: String(item.name ?? ''),
+          appearance: String(item.appearance ?? ''),
+          personality: String(item.personality ?? ''),
+          voiceDescription: String(item.voiceDescription ?? ''),
+        }))
+    : [];
+
+  if (
+    mode === 'cartoon' &&
+    (characters.length < 2 ||
+      characters.some((character) => !character.name))
+  ) {
+    throw new Error(
+      'Cartoon story must include at least two named characters.'
+    );
+  }
+
   const scenes: ReelScene[] = data.scenes.map(
     (item: unknown, index: number) => {
       if (!item || typeof item !== 'object') {
@@ -70,26 +107,43 @@ function normalizeReel(
       }
 
       const scene = item as Record<string, unknown>;
-
       const rawDuration = Number(scene.duration);
-      const duration =
-        Number.isFinite(rawDuration) && rawDuration > 0
-          ? Math.round(rawDuration)
-          : 1;
 
       return {
         sceneNumber: index + 1,
-        duration,
+        duration:
+          Number.isFinite(rawDuration) && rawDuration > 0
+            ? Math.round(rawDuration)
+            : 1,
         visual: String(scene.visual ?? ''),
         voiceover: String(scene.voiceover ?? ''),
         textOverlay: String(
           scene.textOverlay ?? scene.text_overlay ?? ''
         ),
+        ...(mode === 'cartoon'
+          ? {
+              speaker: String(scene.speaker ?? ''),
+              dialogue: String(scene.dialogue ?? ''),
+            }
+          : {}),
       };
     }
   );
 
-  // Adjust scene durations so their total matches the requested duration.
+  if (
+    mode === 'cartoon' &&
+    scenes.some(
+      (scene) =>
+        !scene.visual.trim() ||
+        !scene.speaker?.trim() ||
+        !scene.dialogue?.trim()
+    )
+  ) {
+    throw new Error(
+      'Cartoon scenes must include a visual, speaker, and dialogue.'
+    );
+  }
+
   const totalDuration = scenes.reduce(
     (total, scene) => total + scene.duration,
     0
@@ -121,7 +175,9 @@ function normalizeReel(
       }
 
       const longest = candidates.reduce((best, current) =>
-        current.scene.duration > best.scene.duration ? current : best
+        current.scene.duration > best.scene.duration
+          ? current
+          : best
       );
 
       scenes[longest.index].duration -= 1;
@@ -140,30 +196,90 @@ function normalizeReel(
     callToAction: String(
       data.callToAction ?? data.call_to_action ?? ''
     ),
+    mode,
+    ...(mode === 'cartoon' ? { characters } : {}),
   };
 }
 
 export async function generateReel(
   input: GenerateReelInput
 ): Promise<GeneratedReel> {
-  const prompt = `
-Create a high-quality short-form video script for ReelExpert AI.
+  const mode = input.mode === 'cartoon' ? 'cartoon' : 'standard';
+
+  const commonRequirements = `
+Topic: ${input.topic}
+Target audience: ${input.audience}
+Platform: ${input.platform}
+Language: ${input.language}
+Total duration: exactly ${input.duration} seconds
+Content style: ${input.style || 'Engaging'}
 
 Requirements:
-- Topic: ${input.topic}
-- Target audience: ${input.audience}
-- Platform: ${input.platform}
-- Language: ${input.language}
-- Total duration: exactly ${input.duration} seconds
-- Start with a compelling hook in the first 1-3 seconds.
-- Make the script engaging, specific, and suitable for the platform.
-- Each scene must include a visual direction, voiceover, and text overlay.
-- Scene durations must be positive integers.
-- All scene durations must add up to exactly ${input.duration} seconds.
-- Use natural, spoken language for the voiceover.
-- Do not include markdown or explanations outside the JSON.
+- Start with a compelling hook.
+- Make the content engaging and suitable for the platform.
+- Scene durations must be positive integers and add up to exactly ${input.duration} seconds.
+- Return valid JSON only, without markdown or explanations.
+`;
 
-Return exactly this JSON structure:
+  const cartoonInstructions = `
+Create a children's cartoon story featuring two or three recurring characters.
+
+Additional requirements:
+- Give every character a name, visual appearance, personality, and voice description.
+- Keep each character's appearance consistent across all scenes.
+- Every scene must describe the setting, character actions, facial expressions, and composition.
+- Every scene must have a named speaker and a spoken dialogue line.
+- The speaker must be one of the defined characters.
+- Use short, natural, child-friendly conversations.
+- Create a clear beginning, middle, and ending.
+- Include visual descriptions suitable for generating cartoon illustrations.
+- Keep dialogue in the requested language.
+- Do not claim that images or video have already been generated.
+
+Return this JSON structure:
+{
+  "title": "Story title",
+  "hook": "Opening hook",
+  "description": "Short story description",
+  "hashtags": ["#CartoonStory", "#KidsStory"],
+  "characters": [
+    {
+      "name": "Ayaan",
+      "appearance": "Consistent full character appearance",
+      "personality": "Curious and kind",
+      "voiceDescription": "Young, cheerful voice"
+    },
+    {
+      "name": "Sara",
+      "appearance": "Consistent full character appearance",
+      "personality": "Brave and thoughtful",
+      "voiceDescription": "Young, friendly voice"
+    }
+  ],
+  "scenes": [
+    {
+      "sceneNumber": 1,
+      "duration": 5,
+      "visual": "Detailed cartoon setting, character actions, expressions, and camera composition",
+      "speaker": "Ayaan",
+      "dialogue": "Sara, look what I found!",
+      "voiceover": "Sara, look what I found!",
+      "textOverlay": "A surprising discovery!"
+    }
+  ],
+  "callToAction": "What would you do next?"
+}
+`;
+
+  const standardInstructions = `
+Create a high-quality short-form video script.
+
+Requirements:
+- Include visual direction, voiceover, and text overlay in each scene.
+- Use natural, spoken language.
+- Scene durations must add up to the requested duration.
+
+Return this JSON structure:
 {
   "title": "Short engaging title",
   "hook": "Opening hook",
@@ -180,7 +296,13 @@ Return exactly this JSON structure:
   ],
   "callToAction": "A relevant closing call to action"
 }
-`.trim();
+`;
+
+  const prompt =
+    commonRequirements +
+    (mode === 'cartoon'
+      ? cartoonInstructions
+      : standardInstructions);
 
   const response = await fetch(`${OLLAMA_URL}/api/chat`, {
     method: 'POST',
@@ -193,7 +315,9 @@ Return exactly this JSON structure:
         {
           role: 'system',
           content:
-            'You are an expert short-form video scriptwriter. Return valid JSON only. Follow the requested schema exactly.',
+            mode === 'cartoon'
+              ? 'You are a professional childrens cartoon screenwriter. Create consistent characters and natural dialogue. Return valid JSON only.'
+              : 'You are an expert short-form video scriptwriter. Return valid JSON only.',
         },
         {
           role: 'user',
@@ -219,9 +343,7 @@ Return exactly this JSON structure:
   }
 
   const result = (await response.json()) as {
-    message?: {
-      content?: string;
-    };
+    message?: { content?: string };
     error?: string;
   };
 
@@ -235,7 +357,9 @@ Return exactly this JSON structure:
     throw new Error('Ollama returned an empty response.');
   }
 
-  const parsed = extractJson(content);
-
-  return normalizeReel(parsed, input.duration);
+  return normalizeReel(
+    extractJson(content),
+    input.duration,
+    mode
+  );
 }

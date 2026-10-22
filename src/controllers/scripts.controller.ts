@@ -14,10 +14,12 @@ export async function createScript(
     platform = 'Instagram Reels',
     language = 'English',
     duration = 30,
-    style = 'Engaging'
+    style = 'Engaging',
+    mode = 'standard'
   } = req.body ?? {};
 
-  if (typeof topic !== 'string' || !topic.trim()) {
+  if (typeof topic !== 'string' || !topic.trim() || typeof mode !== 'string' ||
+!['standard', 'cartoon'].includes(mode)) {
     res.status(400).json({
       success: false,
       message: 'Please provide a topic for your reel.'
@@ -50,7 +52,8 @@ export async function createScript(
       platform,
       language,
       duration: Number(duration),
-      style
+      style,
+      mode: mode as 'standard' | 'cartoon'
     });
 
     res.json({

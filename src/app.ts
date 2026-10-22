@@ -2,13 +2,15 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
-import path from 'node:path';
+import path from 'node:path'
+import "dotenv/config";;
 
 import healthRoutes from './routes/health.routes';
 import statusRoutes from './routes/status.routes';
 import scriptsRoutes from './routes/scripts.routes';
 import ttsRoutes from './routes/tts.routes';
 import renderRoutes from './routes/render.routes';
+import cartoonRoutes from "./routes/cartoon.routes";
 
 const app = express();
 
@@ -42,6 +44,7 @@ app.use('/api', statusRoutes);
 app.use('/api', scriptsRoutes);
 app.use('/api', ttsRoutes);
 app.use('/api', renderRoutes);
+app.use("/api/cartoon", cartoonRoutes);
 app.use('/assets', express.static(path.resolve(process.cwd(), 'assets')));
 
 // Static assets: /assets/...
