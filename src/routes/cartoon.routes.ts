@@ -1,7 +1,10 @@
 import express, { Request, Response } from "express";
 import path from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
+import fs from "node:fs/promises";
 import { randomUUID } from "node:crypto";
+import { Client, handle_file } from "@gradio/client";
+import 'dotenv/config';
 
 const router = express.Router();
 
@@ -227,6 +230,177 @@ router.post(
           error instanceof Error
             ? error.message
             : "Unable to generate cartoon scenes."
+      });
+    }
+  }
+);
+
+const ANIMATED_CLIPS_DIR = path.resolve(
+  process.cwd(),
+  "assets",
+  "outputs",
+  "animated-clips"
+);
+
+const WAN_SPACE =
+  "zerogpu-aoti/wan2-2-fp8da-aoti-faster";
+
+const WAN_SPACE_BASE =
+  "https://zerogpu-aoti-wan2-2-fp8da-aoti-faster.hf.space";
+
+router.post(
+  "/animate",
+  async (req: Request, res: Response): Promise<void> => {
+    let outputPath: string | undefined;
+
+    try {
+      const { imageFilename, prompt, durationSeconds } =
+        req.body ?? {};
+
+      if (
+        typeof imageFilename !== "string" ||
+        path.basename(imageFilename) !== imageFilename ||
+        imageFilename.includes("..") ||
+        ![".jpg", ".jpeg", ".png", ".webp"].includes(
+          path.extname(imageFilename).toLowerCase()
+        )
+      ) {
+        res.status(400).json({
+          success: false,
+          message: "Provide a valid cartoon image filename."
+        });
+        return;
+      }
+
+      const duration =
+        durationSeconds === undefined ? 5 : Number(durationSeconds);
+
+      if (!Number.isFinite(duration) || duration < 0.5 || duration > 5) {
+        res.status(400).json({
+          success: false,
+          message: "durationSeconds must be between 0.5 and 5."
+        });
+        return;
+      }
+
+      const imagePath = path.join(
+        OUTPUT_DIR,
+        imageFilename
+      );
+
+      await fs.access(imagePath);
+      await mkdir(ANIMATED_CLIPS_DIR, { recursive: true });
+
+      const motionPrompt =
+        typeof prompt === "string" && prompt.trim()
+          ? prompt.trim().slice(0, 1500)
+          : "Animate this 3D cartoon scene with smooth natural body movement, expressive faces, consistent characters and cinematic motion. No cuts or character distortion.";
+
+      console.log("Connecting to Wan 2.2...");
+
+      const hfToken = process.env.HF_TOKEN?.trim();
+
+      const client = await Client.connect(
+        WAN_SPACE,
+        hfToken ? { token: hfToken } : {}
+      );
+
+      console.log("Submitting image for animation...");
+
+      const result = await client.predict("/generate_video", {
+        input_image: await handle_file(imagePath),
+        prompt: motionPrompt,
+        steps: 6,
+        negative_prompt:
+          "static image, frozen movement, distorted faces, " +
+          "extra limbs, extra fingers, flicker, subtitles, " +
+          "watermarks, blurry details",
+        duration_seconds: duration,
+        guidance_scale: 1,
+        guidance_scale_2: 1,
+        seed: 42,
+        randomize_seed: true
+      });
+
+      const video = result.data[0] as {
+        url?: string;
+        path?: string;
+        orig_name?: string;
+      };
+
+      if (!video || typeof video.url !== "string") {
+        throw new Error(
+          "Wan returned no downloadable video URL. " +
+          JSON.stringify(video)
+        );
+      }
+
+      const downloadUrl = new URL(
+        video.url,
+        WAN_SPACE_BASE
+      ).toString();
+
+      const videoResponse = await fetch(downloadUrl, {
+        signal: AbortSignal.timeout(120000)
+      });
+
+      if (!videoResponse.ok) {
+        throw new Error(
+          `Could not download Wan video: HTTP ${videoResponse.status}`
+        );
+      }
+
+      const contentType =
+        videoResponse.headers.get("content-type") || "";
+
+      if (
+        !contentType.startsWith("video/") &&
+        !contentType.includes("octet-stream")
+      ) {
+        throw new Error(
+          `Unexpected video response type: ${contentType}`
+        );
+      }
+
+      const videoBuffer = Buffer.from(
+        await videoResponse.arrayBuffer()
+      );
+
+      if (videoBuffer.length === 0) {
+        throw new Error("Wan returned an empty video.");
+      }
+
+      const filename = `${randomUUID()}.mp4`;
+      outputPath = path.join(ANIMATED_CLIPS_DIR, filename);
+
+      await writeFile(outputPath, videoBuffer);
+
+      console.log("Wan animation saved:", filename);
+
+      res.status(201).json({
+        success: true,
+        message: "Animated cartoon clip generated.",
+        clip: {
+          filename,
+          url: `/assets/outputs/animated-clips/${filename}`,
+          durationSeconds: duration,
+          sizeBytes: videoBuffer.length,
+          provider: "wan-2.2"
+        }
+      });
+    } catch (error) {
+      if (outputPath) {
+        await fs.unlink(outputPath).catch(() => undefined);
+      }
+
+      console.error("Wan animation failed:", error);
+
+      res.status(502).json({
+        success: false,
+        message:
+          error instanceof Error
+            ? error.message
+            : "Wan animation failed. Try again later."
       });
     }
   }

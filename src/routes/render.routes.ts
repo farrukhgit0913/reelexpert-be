@@ -12,6 +12,7 @@ const ASSETS_DIR = path.resolve(process.cwd(), 'assets');
 const VIDEO_DIR = path.join(ASSETS_DIR, 'stock-footage');
 const OUTPUT_DIR = path.join(ASSETS_DIR, 'outputs');
 const CARTOON_DIR = path.join(OUTPUT_DIR, 'cartoon-scenes');
+const ANIMATED_CLIPS_DIR = path.join(OUTPUT_DIR, 'animated-clips');
 
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v']);
 const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a']);
@@ -42,6 +43,7 @@ router.get('/footage', async (_req, res) => {
     await fs.mkdir(VIDEO_DIR, { recursive: true });
 
     const files = await fs.readdir(VIDEO_DIR);
+
     const videos = files
       .filter((name) =>
         VIDEO_EXTENSIONS.has(path.extname(name).toLowerCase())
@@ -64,12 +66,19 @@ router.post('/render', async (req, res) => {
     videoFilename,
     audioFilename,
     cartoonSceneFilenames,
+    animatedClipFilenames,
   } = req.body ?? {};
 
+  const animatedMode =
+    Array.isArray(animatedClipFilenames) &&
+    animatedClipFilenames.length > 0;
+
   const cartoonMode =
+    !animatedMode &&
     Array.isArray(cartoonSceneFilenames) &&
     cartoonSceneFilenames.length > 0;
 
+  // Validate narration audio.
   if (
     !isSafeFilename(audioFilename) ||
     !AUDIO_EXTENSIONS.has(path.extname(audioFilename).toLowerCase())
@@ -80,7 +89,24 @@ router.post('/render', async (req, res) => {
     });
   }
 
-  if (cartoonMode) {
+  // Validate the selected source mode.
+  if (animatedMode) {
+    if (
+      animatedClipFilenames.length > 30 ||
+      !animatedClipFilenames.every(
+        (filename: unknown) =>
+          isSafeFilename(filename) &&
+          VIDEO_EXTENSIONS.has(
+            path.extname(filename).toLowerCase()
+          )
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        error: 'Provide 1 to 30 valid animated clip filenames.',
+      });
+    }
+  } else if (cartoonMode) {
     if (
       cartoonSceneFilenames.length > 30 ||
       !cartoonSceneFilenames.every(
@@ -114,12 +140,19 @@ router.post('/render', async (req, res) => {
 
   try {
     await fs.mkdir(OUTPUT_DIR, { recursive: true });
-
     await fs.access(audioPath);
 
     let sourceFiles: string[] = [];
 
-    if (cartoonMode) {
+    if (animatedMode) {
+      sourceFiles = animatedClipFilenames as string[];
+
+      await Promise.all(
+        sourceFiles.map((filename) =>
+          fs.access(path.join(ANIMATED_CLIPS_DIR, filename))
+        )
+      );
+    } else if (cartoonMode) {
       sourceFiles = cartoonSceneFilenames as string[];
 
       await Promise.all(
@@ -141,10 +174,14 @@ router.post('/render', async (req, res) => {
       }
     }
 
+    // Determine the narration duration.
     const probe = await execFileAsync(FFPROBE_PATH, [
-      '-v', 'error',
-      '-show_entries', 'format=duration',
-      '-of', 'default=noprint_wrappers=1:nokey=1',
+      '-v',
+      'error',
+      '-show_entries',
+      'format=duration',
+      '-of',
+      'default=noprint_wrappers=1:nokey=1',
       audioPath,
     ]);
 
@@ -154,22 +191,35 @@ router.post('/render', async (req, res) => {
       throw new Error('Invalid narration duration.');
     }
 
-    const sceneCount = cartoonMode ? sourceFiles.length : 3;
+    const sceneCount = animatedMode
+      ? sourceFiles.length
+      : cartoonMode
+        ? sourceFiles.length
+        : 3;
+
     const sceneDuration = duration / sceneCount;
     const inputArgs: string[] = [];
     const filters: string[] = [];
 
-    // Add one input per scene.
+    // Add one video/image input per scene.
     for (let i = 0; i < sceneCount; i++) {
-      if (cartoonMode) {
+      if (animatedMode) {
+        inputArgs.push(
+          '-i',
+          path.join(ANIMATED_CLIPS_DIR, sourceFiles[i])
+        );
+      } else if (cartoonMode) {
         const imagePath = path.join(CARTOON_DIR, sourceFiles[i]);
 
-        // Loop the still image so FFmpeg can animate it.
         inputArgs.push(
-          '-loop', '1',
-          '-framerate', '30',
-          '-t', String(sceneDuration),
-          '-i', imagePath
+          '-loop',
+          '1',
+          '-framerate',
+          '30',
+          '-t',
+          String(sceneDuration),
+          '-i',
+          imagePath
         );
       } else {
         const filename =
@@ -178,21 +228,24 @@ router.post('/render', async (req, res) => {
             : sourceFiles[i % sourceFiles.length];
 
         inputArgs.push(
-          '-stream_loop', '-1',
-          '-i', path.join(VIDEO_DIR, filename)
+          '-stream_loop',
+          '-1',
+          '-i',
+          path.join(VIDEO_DIR, filename)
         );
       }
     }
 
-    // The narration is the final input.
+    // Add narration exactly once as the final input.
     inputArgs.push('-i', audioPath);
 
+    // Prepare every scene for portrait video output.
     for (let i = 0; i < sceneCount; i++) {
       const fadeOutStart = Math.max(0, sceneDuration - 0.35);
 
-      const title = cartoonMode
-        ? ''
-        : TITLES[i % TITLES.length].replace(/[^A-Za-z0-9 ]/g, '');
+      const title = !cartoonMode && !animatedMode
+        ? TITLES[i % TITLES.length].replace(/[^A-Za-z0-9 ]/g, '')
+        : '';
 
       const titleFilter = title
         ? `drawtext=text='${title}':fontcolor=white:fontsize=62:` +
@@ -200,23 +253,43 @@ router.post('/render', async (req, res) => {
           `alpha='if(lt(t,0.4),t/0.4,1)',`
         : '';
 
-      filters.push(
-        `[${i}:v]` +
-        `trim=duration=${sceneDuration},` +
-        `setpts=PTS-STARTPTS,` +
-        `scale=1080:1920:force_original_aspect_ratio=increase,` +
-        `crop=1080:1920,` +
-        `zoompan=z='min(zoom+0.0006,1.08)':` +
-        `x='iw/2-(iw/zoom/2)':` +
-        `y='ih/2-(ih/zoom/2)':` +
-        `d=1:s=1080x1920:fps=30,` +
-        titleFilter +
-        `fade=t=in:st=0:d=0.35,` +
-        `fade=t=out:st=${fadeOutStart}:d=0.35,` +
-        `setsar=1,format=yuv420p[v${i}]`
-      );
+      if (animatedMode) {
+        // Preserve AI-generated motion.
+        // Extend short clips by holding the final frame.
+        filters.push(
+          `[${i}:v]` +
+          `setpts=PTS-STARTPTS,` +
+          `scale=1080:1920:force_original_aspect_ratio=increase,` +
+          `crop=1080:1920,` +
+          `fps=30,` +
+          `tpad=stop_mode=clone:stop_duration=${sceneDuration},` +
+          `trim=duration=${sceneDuration},` +
+          `setpts=PTS-STARTPTS,` +
+          `fade=t=in:st=0:d=0.35,` +
+          `fade=t=out:st=${fadeOutStart}:d=0.35,` +
+          `setsar=1,format=yuv420p[v${i}]`
+        );
+      } else {
+        // Preserve the existing still-cartoon and stock-footage behavior.
+        filters.push(
+          `[${i}:v]` +
+          `trim=duration=${sceneDuration},` +
+          `setpts=PTS-STARTPTS,` +
+          `scale=1080:1920:force_original_aspect_ratio=increase,` +
+          `crop=1080:1920,` +
+          `zoompan=z='min(zoom+0.0006,1.08)':` +
+          `x='iw/2-(iw/zoom/2)':` +
+          `y='ih/2-(ih/zoom/2)':` +
+          `d=1:s=1080x1920:fps=30,` +
+          titleFilter +
+          `fade=t=in:st=0:d=0.35,` +
+          `fade=t=out:st=${fadeOutStart}:d=0.35,` +
+          `setsar=1,format=yuv420p[v${i}]`
+        );
+      }
     }
 
+    // Join all scene video streams.
     filters.push(
       `${Array.from(
         { length: sceneCount },
@@ -225,24 +298,38 @@ router.post('/render', async (req, res) => {
       `concat=n=${sceneCount}:v=1:a=0[outv]`
     );
 
+    // The narration input index equals sceneCount.
     await execFileAsync(
       FFMPEG_PATH,
       [
         '-y',
         ...inputArgs,
-        '-filter_complex', filters.join(';'),
-        '-map', '[outv]',
-        '-map', `${sceneCount}:a:0`,
-        '-t', String(duration),
-        '-c:v', 'libx264',
-        '-preset', 'veryfast',
-        '-crf', '23',
-        '-pix_fmt', 'yuv420p',
-        '-r', '30',
-        '-c:a', 'aac',
-        '-b:a', '192k',
-        '-ar', '44100',
-        '-movflags', '+faststart',
+        '-filter_complex',
+        filters.join(';'),
+        '-map',
+        '[outv]',
+        '-map',
+        `${sceneCount}:a:0`,
+        '-t',
+        String(duration),
+        '-c:v',
+        'libx264',
+        '-preset',
+        'veryfast',
+        '-crf',
+        '23',
+        '-pix_fmt',
+        'yuv420p',
+        '-r',
+        '30',
+        '-c:a',
+        'aac',
+        '-b:a',
+        '192k',
+        '-ar',
+        '44100',
+        '-movflags',
+        '+faststart',
         outputPath,
       ],
       {
@@ -259,9 +346,11 @@ router.post('/render', async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      message: cartoonMode
-        ? 'Cartoon reel rendered successfully.'
-        : 'Animated reel rendered successfully.',
+      message: animatedMode
+        ? 'AI-animated cartoon reel rendered successfully.'
+        : cartoonMode
+          ? 'Cartoon reel rendered successfully.'
+          : 'Animated reel rendered successfully.',
       video: {
         filename: outputFilename,
         url: `/assets/outputs/${outputFilename}`,
@@ -270,7 +359,11 @@ router.post('/render', async (req, res) => {
         height: 1920,
         durationSeconds: duration,
         scenes: sceneCount,
-        mode: cartoonMode ? 'cartoon' : 'standard',
+        mode: animatedMode
+          ? 'ai-animated-cartoon'
+          : cartoonMode
+            ? 'cartoon'
+            : 'standard',
         sizeBytes: stats.size,
       },
     });
@@ -289,14 +382,18 @@ router.post('/render', async (req, res) => {
         'FFmpeg stderr:',
         details.stderr ?? 'No stderr available'
       );
-      console.error('FFmpeg stdout:', details.stdout ?? '');
+      console.error(
+        'FFmpeg stdout:',
+        details.stdout ?? ''
+      );
     } else {
       console.error('Video rendering failed:', error);
     }
 
     return res.status(500).json({
       success: false,
-      error: 'Video rendering failed. Check FFmpeg, ffprobe, and input files.',
+      error:
+        'Video rendering failed. Check FFmpeg, ffprobe, and input files.',
     });
   }
 });
