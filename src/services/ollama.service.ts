@@ -225,8 +225,12 @@ Requirements:
 Create a children's cartoon story featuring two or three recurring characters.
 
 Additional requirements:
-- Give every character a name, visual appearance, personality, and voice description.
+- Use exactly two recurring characters named Ayaan and Mina.
+- Ayaan is the boy character; Mina is the girl character.
+- Give each character a visual appearance, personality, and voice description.
 - Keep each character's appearance consistent across all scenes.
+- Alternate naturally between Ayaan and Mina as speakers when appropriate.
+- The speaker value must be exactly "Ayaan" or "Mina" so the matching child voice can be selected.
 - Every scene must describe the setting, character actions, facial expressions, and composition.
 - Every scene must have a named speaker and a spoken dialogue line.
 - The speaker must be one of the defined characters.
@@ -250,7 +254,7 @@ Return this JSON structure:
       "voiceDescription": "Young, cheerful voice"
     },
     {
-      "name": "Sara",
+      "name": "Mina",
       "appearance": "Consistent full character appearance",
       "personality": "Brave and thoughtful",
       "voiceDescription": "Young, friendly voice"
@@ -262,8 +266,8 @@ Return this JSON structure:
       "duration": 5,
       "visual": "Detailed cartoon setting, character actions, expressions, and camera composition",
       "speaker": "Ayaan",
-      "dialogue": "Sara, look what I found!",
-      "voiceover": "Sara, look what I found!",
+      "dialogue": "Ayaan, look what I found!",
+      "voiceover": "Ayaan, look what I found!",
       "textOverlay": "A surprising discovery!"
     }
   ],

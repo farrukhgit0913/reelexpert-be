@@ -67,6 +67,7 @@ router.post('/render', async (req, res) => {
     audioFilename,
     cartoonSceneFilenames,
     animatedClipFilenames,
+    sceneDurations,
   } = req.body ?? {};
 
   const animatedMode =
@@ -197,6 +198,37 @@ router.post('/render', async (req, res) => {
         ? sourceFiles.length
         : 3;
 
+    if (sceneDurations !== undefined) {
+      if (
+        !animatedMode ||
+        !Array.isArray(sceneDurations) ||
+        sceneDurations.length !== sceneCount ||
+        !sceneDurations.every(
+          (value: unknown) =>
+            typeof value === 'number' &&
+            Number.isFinite(value) &&
+            value > 0
+        )
+      ) {
+        return res.status(400).json({
+          success: false,
+          error: 'Scene durations must contain one positive duration per animated clip.',
+        });
+      }
+
+      const totalSceneDuration = sceneDurations.reduce(
+        (sum: number, value: number) => sum + value,
+        0
+      );
+
+      if (Math.abs(totalSceneDuration - duration) > 0.5) {
+        return res.status(400).json({
+          success: false,
+          error: 'Scene durations must add up to the narration audio duration.',
+        });
+      }
+    }
+
     const sceneDuration = duration / sceneCount;
     const inputArgs: string[] = [];
     const filters: string[] = [];
@@ -241,7 +273,11 @@ router.post('/render', async (req, res) => {
 
     // Prepare every scene for portrait video output.
     for (let i = 0; i < sceneCount; i++) {
-      const fadeOutStart = Math.max(0, sceneDuration - 0.35);
+      const currentSceneDuration =
+        animatedMode && Array.isArray(sceneDurations)
+          ? sceneDurations[i]
+          : sceneDuration;
+      const fadeOutStart = Math.max(0, currentSceneDuration - 0.35);
 
       const title = !cartoonMode && !animatedMode
         ? TITLES[i % TITLES.length].replace(/[^A-Za-z0-9 ]/g, '')
@@ -262,8 +298,8 @@ router.post('/render', async (req, res) => {
           `scale=1080:1920:force_original_aspect_ratio=increase,` +
           `crop=1080:1920,` +
           `fps=30,` +
-          `tpad=stop_mode=clone:stop_duration=${sceneDuration},` +
-          `trim=duration=${sceneDuration},` +
+          `tpad=stop_mode=clone:stop_duration=${currentSceneDuration},` +
+          `trim=duration=${currentSceneDuration},` +
           `setpts=PTS-STARTPTS,` +
           `fade=t=in:st=0:d=0.35,` +
           `fade=t=out:st=${fadeOutStart}:d=0.35,` +

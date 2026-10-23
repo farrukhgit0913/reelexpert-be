@@ -13,6 +13,9 @@ const router = Router();
 const ROOT = process.cwd();
 const FOOTAGE_DIR = path.join(ROOT, 'assets', 'stock-footage');
 const OUTPUT_DIR = path.join(ROOT, 'assets', 'outputs');
+const FFMPEG_PATH = '/opt/homebrew/opt/ffmpeg-full/bin/ffmpeg';
+const FFPROBE_PATH = '/opt/homebrew/opt/ffmpeg-full/bin/ffprobe';
+const SAY_PATH = '/usr/bin/say';
 
 const OLLAMA_URL = (
   process.env.OLLAMA_URL || 'http://127.0.0.1:11434'
@@ -25,13 +28,17 @@ router.get('/status', async (_req, res) => {
     const [
       nodeCheck,
       ffmpegCheck,
+      ffprobeCheck,
+      sayCheck,
       ollamaResult,
       footageExists,
       footageHasFiles,
       outputExists
     ] = await Promise.all([
       checkCommand(process.execPath, ['--version']),
-      checkCommand('ffmpeg', ['-version']),
+      checkCommand(FFMPEG_PATH, ['-version']),
+      checkCommand(FFPROBE_PATH, ['-version']),
+      checkCommand(SAY_PATH, ['-v', '?']),
       fetch(`${OLLAMA_URL}/api/tags`, {
         signal: AbortSignal.timeout(3000)
       })
@@ -143,17 +150,33 @@ router.get('/status', async (_req, res) => {
         },
         tts: {
           name: 'Text-to-Speech',
-          description: 'Narration audio generation',
-          status: 'offline',
-          healthCheck: 'failed',
-          message: 'Not integrated yet'
+          description: 'macOS speech synthesis and audio conversion',
+          status: sayCheck.online && ffmpegCheck.online ? 'online' : 'offline',
+          healthCheck: sayCheck.online && ffmpegCheck.online ? 'passed' : 'failed',
+          message: !sayCheck.online
+            ? 'macOS say command is unavailable'
+            : !ffmpegCheck.online
+              ? 'FFmpeg is unavailable for audio conversion'
+              : 'Speech synthesis and audio conversion tools are available'
         },
         renderer: {
           name: 'Video Renderer',
           description: 'Video, narration and subtitle composition',
-          status: 'offline',
-          healthCheck: 'failed',
-          message: 'Rendering endpoint not implemented yet'
+          status:
+            ffmpegCheck.online && ffprobeCheck.online && outputExists
+              ? 'online'
+              : 'offline',
+          healthCheck:
+            ffmpegCheck.online && ffprobeCheck.online && outputExists
+              ? 'passed'
+              : 'failed',
+          message: !ffmpegCheck.online
+            ? 'FFmpeg is unavailable'
+            : !ffprobeCheck.online
+              ? 'FFprobe is unavailable'
+              : !outputExists
+                ? 'Video output directory is missing'
+                : 'Video encoding, probing and output storage are available'
         }
       }
     });
