@@ -11,6 +11,7 @@ import scriptsRoutes from './routes/scripts.routes';
 import ttsRoutes from './routes/tts.routes';
 import renderRoutes from './routes/render.routes';
 import cartoonRoutes from "./routes/cartoon.routes";
+import imageToCartoonRoutes from "./routes/image-to-cartoon.routes";
 
 const app = express();
 
@@ -45,6 +46,7 @@ app.use('/api', scriptsRoutes);
 app.use('/api', ttsRoutes);
 app.use('/api', renderRoutes);
 app.use("/api/cartoon", cartoonRoutes);
+app.use("/api/image-to-cartoon", imageToCartoonRoutes);
 app.use('/assets', express.static(path.resolve(process.cwd(), 'assets')));
 
 // Static assets: /assets/...
